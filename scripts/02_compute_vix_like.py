@@ -108,7 +108,7 @@ def run_pipeline(
             result = compute_daily_vix(day_df, quote_date)
             results.append(result)
             
-            qc = compute_day_qc_metrics(day_df, quote_date)
+            qc = compute_day_qc_metrics(day_df, quote_date, vix_result=result)
             qc_metrics.append(qc)
             
             if verbose and not result.success:

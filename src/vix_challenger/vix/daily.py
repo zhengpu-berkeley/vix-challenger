@@ -53,6 +53,21 @@ class DailyVIXResult:
     # Strike counts
     n_strikes_near: Optional[int] = None
     n_strikes_next: Optional[int] = None
+
+    # --- Expiry-level QC summaries (OTM strip / variance contributions) ---
+    # These are intended to help diagnose spikes due to broken strike ladders
+    # or tail-strike dominance in the 1/K^2 weighting.
+    near_strip_strike_min: Optional[float] = None
+    near_strip_strike_max: Optional[float] = None
+    near_top_contrib_strike: Optional[float] = None
+    near_top_contrib_frac: Optional[float] = None
+    near_min_strike_contrib_frac: Optional[float] = None
+
+    next_strip_strike_min: Optional[float] = None
+    next_strip_strike_max: Optional[float] = None
+    next_top_contrib_strike: Optional[float] = None
+    next_top_contrib_frac: Optional[float] = None
+    next_min_strike_contrib_frac: Optional[float] = None
     
     # Underlying price
     underlying_price: Optional[float] = None
@@ -86,6 +101,27 @@ def compute_daily_vix(
         DailyVIXResult with index value and diagnostics
     """
     result = DailyVIXResult(quote_date=quote_date)
+
+    def _populate_contrib_qc(prefix: str, var_result: VarianceResult) -> None:
+        """Populate strip/contribution QC fields on the result object."""
+        if var_result.n_strikes <= 0:
+            return
+        strikes = var_result.strikes
+        contrib = var_result.strike_contributions
+        if strikes.size == 0 or contrib.size == 0:
+            return
+        total = float(np.sum(contrib))
+        if total <= 0:
+            return
+
+        min_idx = int(np.argmin(strikes))
+        top_idx = int(np.argmax(contrib))
+
+        setattr(result, f"{prefix}_strip_strike_min", float(np.min(strikes)))
+        setattr(result, f"{prefix}_strip_strike_max", float(np.max(strikes)))
+        setattr(result, f"{prefix}_top_contrib_strike", float(strikes[top_idx]))
+        setattr(result, f"{prefix}_top_contrib_frac", float(contrib[top_idx]) / total)
+        setattr(result, f"{prefix}_min_strike_contrib_frac", float(contrib[min_idx]) / total)
     
     # Get underlying price
     underlying_prices = day_df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
@@ -129,6 +165,7 @@ def compute_daily_vix(
         result.forward_near = var_near_result.forward
         result.k0_near = var_near_result.k0
         result.n_strikes_near = var_near_result.n_strikes
+        _populate_contrib_qc("near", var_near_result)
         
     except ValueError as e:
         result.skip_reason = "NEAR_VARIANCE_ERROR"
@@ -159,6 +196,7 @@ def compute_daily_vix(
         result.forward_next = var_next_result.forward
         result.k0_next = var_next_result.k0
         result.n_strikes_next = var_next_result.n_strikes
+        _populate_contrib_qc("next", var_next_result)
         
     except ValueError as e:
         result.skip_reason = "NEXT_VARIANCE_ERROR"
@@ -169,14 +207,27 @@ def compute_daily_vix(
         result.error_detail = f"Next expiry: {e}\n{traceback.format_exc()}"
         return result
     
-    # Step 4: Check for negative variance
-    if result.sigma2_near < 0:
+    # Step 4: Handle negative variance
+    #
+    # Large negative variance indicates a bad chain (e.g., broken strike ladder,
+    # forward/K0 mismatch, or bad quotes). Do NOT take abs() here; that can
+    # create massive artificial spikes.
+    neg_tol = -1e-8
+    if result.sigma2_near is not None and result.sigma2_near < 0:
+        if result.sigma2_near < neg_tol:
+            result.skip_reason = "NEGATIVE_VAR_NEAR"
+            result.error_detail = f"Near variance < 0: {result.sigma2_near:.6f}"
+            return result
         result.warning = (result.warning or "") + f" NEGATIVE_VAR_NEAR({result.sigma2_near:.6f})"
-        result.sigma2_near = abs(result.sigma2_near)
-    
-    if result.sigma2_next < 0:
+        result.sigma2_near = 0.0
+
+    if result.sigma2_next is not None and result.sigma2_next < 0:
+        if result.sigma2_next < neg_tol:
+            result.skip_reason = "NEGATIVE_VAR_NEXT"
+            result.error_detail = f"Next variance < 0: {result.sigma2_next:.6f}"
+            return result
         result.warning = (result.warning or "") + f" NEGATIVE_VAR_NEXT({result.sigma2_next:.6f})"
-        result.sigma2_next = abs(result.sigma2_next)
+        result.sigma2_next = 0.0
     
     # Step 5: Interpolate to 30-day variance
     try:
@@ -221,6 +272,16 @@ def result_to_dict(result: DailyVIXResult) -> dict:
         "k0_next": result.k0_next,
         "n_strikes_near": result.n_strikes_near,
         "n_strikes_next": result.n_strikes_next,
+        "near_strip_strike_min": result.near_strip_strike_min,
+        "near_strip_strike_max": result.near_strip_strike_max,
+        "near_top_contrib_strike": result.near_top_contrib_strike,
+        "near_top_contrib_frac": result.near_top_contrib_frac,
+        "near_min_strike_contrib_frac": result.near_min_strike_contrib_frac,
+        "next_strip_strike_min": result.next_strip_strike_min,
+        "next_strip_strike_max": result.next_strip_strike_max,
+        "next_top_contrib_strike": result.next_top_contrib_strike,
+        "next_top_contrib_frac": result.next_top_contrib_frac,
+        "next_min_strike_contrib_frac": result.next_min_strike_contrib_frac,
         "underlying_price": result.underlying_price,
         "success": result.success,
         "skip_reason": result.skip_reason,

@@ -67,6 +67,34 @@ def build_otm_strip(
     """
     # Sort by strike
     df = expiry_df.sort(Cols.STRIKE)
+
+    # -------------------------------------------------------------------------
+    # Strike sanity guard (single-stock chains can contain extreme deep-tail
+    # strikes with spurious/non-sense quotes that dominate the 1/K^2 weighting).
+    #
+    # We keep a broad moneyness envelope around spot to avoid tiny strikes like
+    # 1, 7, 20 when spot is in the hundreds. These strikes can have bad quotes
+    # (bid/ask glitches) and blow up variance.
+    #
+    # For index-like underlyings (e.g. SPY), this filter usually has no effect
+    # because strike ranges are already reasonable.
+    # -------------------------------------------------------------------------
+    if Cols.UNDERLYING_PRICE in df.columns:
+        spot_series = df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
+        if len(spot_series) > 0:
+            spot = float(spot_series.head(1).item())
+            if spot > 0:
+                min_moneyness = 0.20
+                max_moneyness = 5.00
+                strike_min_guard = spot * min_moneyness
+                strike_max_guard = spot * max_moneyness
+
+                # Apply only if the chain includes extreme strikes (otherwise no-op)
+                if (df[Cols.STRIKE].min() < strike_min_guard) or (df[Cols.STRIKE].max() > strike_max_guard):
+                    df = df.filter(
+                        (pl.col(Cols.STRIKE) >= strike_min_guard)
+                        & (pl.col(Cols.STRIKE) <= strike_max_guard)
+                    )
     
     # Build OTM quote column:
     # - K < K0: use P_MID

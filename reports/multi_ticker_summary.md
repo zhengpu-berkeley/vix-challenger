@@ -9,8 +9,8 @@ This report summarizes the computation of VIX-like (model-free implied volatilit
 | Ticker | Period | Trading Days | Success Rate | Data Source |
 |--------|--------|--------------|--------------|-------------|
 | SPY | 2020-2022 | 758 | 100% | Kaggle (kylegraupe) |
-| AAPL | 2016-2020 | 1,253 | 100% | Kaggle (kylegraupe) |
-| TSLA | 2019-2022 | 1,010 | 98% | Kaggle (kylegraupe) |
+| AAPL | 2016-2020 | 1,253 | 99.9% | Kaggle (kylegraupe) |
+| TSLA | 2019-2022 | 1,010 | 99.9% | Kaggle (kylegraupe) |
 | NVDA | 2020-2022 | 756 | 100% | Kaggle (kylegraupe) |
 
 ## VIX-like Index Statistics
@@ -19,24 +19,24 @@ This report summarizes the computation of VIX-like (model-free implied volatilit
 
 | Ticker | Mean | Std Dev | Min | Max | Period |
 |--------|------|---------|-----|-----|--------|
-| SPY | 24.42 | 12.51 | 11.71 | 81.11 | 2020-2022 |
-| AAPL | 28.96 | 11.23 | 14.21 | 101.46 | 2016-2020 |
-| TSLA | 76.41 | 95.02 | 35.57 | 2754.54* | 2019-2022 |
-| NVDA | 53.67 | 18.61 | 31.01 | 333.76 | 2020-2022 |
+| SPY | 24.41 | 8.56 | 11.71 | 81.11 | 2020-2022 |
+| AAPL | 28.90 | 10.42 | 14.21 | 99.98 | 2016-2020 |
+| TSLA | 70.59 | 19.34 | 35.57 | 188.11 | 2019-2022 |
+| NVDA | 53.67 | 15.41 | 31.01 | 333.54 | 2020-2022 |
 
-*TSLA has extreme outliers in early 2019 due to low options liquidity.
+*TSLA extreme spikes were traced to broken strike ladders / tail-strike dominance and are now handled via explicit QC and stricter validity checks.*
 
 ### Common Period Statistics (2020)
 
-For the 249 trading days common to all tickers (Jan-Dec 2020):
+For the 247 trading days common to all tickers (Jan-Dec 2020):
 
 | Ticker | Mean | Std Dev | Min | Max |
 |--------|------|---------|-----|-----|
-| SPY | 28.88 | 12.14 | 11.71 | 81.11 |
-| AAPL | 43.53 | 13.23 | 26.21 | 101.46 |
-| TSLA | 92.66 | 36.32 | 52.07 | 452.62 |
-| NVDA | 53.25 | 12.81 | 31.01 | 107.60 |
-| VIXCLS | 29.31 | 12.39 | 12.10 | 82.69 |
+| SPY | 28.90 | 12.18 | 11.71 | 81.11 |
+| AAPL | 43.22 | 12.70 | 26.21 | 99.98 |
+| TSLA | 89.24 | 24.20 | 52.07 | 188.11 |
+| NVDA | 53.20 | 12.83 | 31.01 | 107.60 |
+| VIXCLS | 29.33 | 12.43 | 12.10 | 82.69 |
 
 ## Correlation Analysis
 
@@ -44,11 +44,11 @@ For the 249 trading days common to all tickers (Jan-Dec 2020):
 
 |        | SPY    | AAPL   | TSLA   | NVDA   | VIXCLS |
 |--------|--------|--------|--------|--------|--------|
-| SPY    | 1.0000 | 0.7782 | 0.4158 | 0.9073 | 0.9987 |
-| AAPL   | 0.7782 | 1.0000 | 0.5642 | 0.8007 | 0.7799 |
-| TSLA   | 0.4158 | 0.5642 | 1.0000 | 0.5039 | 0.4141 |
-| NVDA   | 0.9073 | 0.8007 | 0.5039 | 1.0000 | 0.9063 |
-| VIXCLS | 0.9987 | 0.7799 | 0.4141 | 0.9063 | 1.0000 |
+| SPY    | 1.0000 | 0.8232 | 0.6089 | 0.9090 | 0.9987 |
+| AAPL   | 0.8232 | 1.0000 | 0.7437 | 0.8357 | 0.8245 |
+| TSLA   | 0.6089 | 0.7437 | 1.0000 | 0.6852 | 0.6080 |
+| NVDA   | 0.9090 | 0.8357 | 0.6852 | 1.0000 | 0.9081 |
+| VIXCLS | 0.9987 | 0.8245 | 0.6080 | 0.9081 | 1.0000 |
 
 ### Key Findings
 
@@ -62,19 +62,18 @@ For the 249 trading days common to all tickers (Jan-Dec 2020):
 3. **AAPL has moderate market correlation** (r = 0.78 with VIXCLS)
    - Single-stock idiosyncratic risk adds ~15 points to baseline
    
-4. **TSLA has low market correlation** (r = 0.41 with VIXCLS)
-   - High idiosyncratic "meme stock" volatility
-   - Mean IV ~63 points higher than market VIX
-   - Extreme spikes during stock splits and earnings
+4. **TSLA has material idiosyncratic volatility** (r = 0.61 with VIXCLS in 2020)
+   - Mean IV remains far above market VIX
+   - Chain quality issues (broken strike ladders / tail strikes) required explicit QC to avoid artificial spikes
 
 ## Comparison to FRED VIXCLS
 
 | Ticker | Correlation | RMSE | Mean Bias | Period |
 |--------|-------------|------|-----------|--------|
-| SPY | 0.9969 | 0.82 | -0.41 | 2020-2022 |
-| AAPL | 0.8598 | 12.55 | +11.32 | 2016-2020 |
-| TSLA | 0.1076 | 107.42 | +53.81 | 2019-2022 |
-| NVDA | 0.5453 | 31.58 | +28.80 | 2020-2022 |
+| SPY | 0.9970 | 0.81 | -0.42 | 2020-2022 |
+| AAPL | 0.8731 | 12.36 | +11.26 | 2016-2020 |
+| TSLA | 0.6912 | 50.32 | +48.11 | 2019-2022 |
+| NVDA | 0.5455 | 31.57 | +28.80 | 2020-2022 |
 
 ## Volatility Premium Analysis
 
@@ -90,9 +89,9 @@ Single-stock options command a volatility premium over index options due to:
 | Ticker | Premium | Notes |
 |--------|---------|-------|
 | SPY | -0.4 pts | Near-perfect replication |
-| AAPL | +14.2 pts | Large-cap tech premium |
+| AAPL | +13.9 pts | Large-cap tech premium |
 | NVDA | +23.9 pts | Semiconductor/AI exposure |
-| TSLA | +63.4 pts | Meme stock, high retail interest |
+| TSLA | +59.9 pts | High idiosyncratic volatility |
 
 ## Generated Artifacts
 
@@ -126,6 +125,15 @@ Single-stock options command a volatility premium over index options due to:
 4. **Interpolation**: Standard Cboe 30-day constant maturity formula
 5. **Data source**: All datasets from Kyle Graupe's Kaggle collections
 
+## QC Enhancements (for Single-Stock Chains)
+
+Diagnostics in `data/processed/{ticker}_diagnostics.parquet` now include explicit columns to catch chain pathologies that can create artificial spikes:
+
+- **Parity / K0 sanity**: `*_parity_forward`, `*_parity_k0`, `*_parity_f_over_k0`, `*_forward_gap_pct_underlying`
+- **Strike ladder gaps**: `*_spot_gap_pct_underlying`, `*_max_strike_gap_pct_underlying`
+- **Tail strike flags**: `*_strike_guard_applied`, `*_n_strikes_below_20pct_spot`
+- **Dominance checks (from OTM strip)**: `*_top_contrib_frac`, `*_min_strike_contrib_frac`
+
 ## Conclusions
 
 1. The VIX methodology successfully replicates VIXCLS when applied to SPY options (correlation > 0.99)
@@ -139,5 +147,5 @@ Single-stock options command a volatility premium over index options due to:
 
 ---
 
-*Report generated: 2024*
+*Report generated: 2025*
 

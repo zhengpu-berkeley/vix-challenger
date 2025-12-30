@@ -90,6 +90,26 @@ def compute_expiry_variance(
     forward_result = compute_forward_price(expiry_df, r=r, dte=dte)
     F = forward_result.forward
     K0 = forward_result.k0
+
+    # Sanity checks: K0 should be close to spot and close to the forward.
+    # If the strike grid is broken (e.g., huge gaps), K0 can end up far from F,
+    # making the adjustment term explode and variance go negative/unstable.
+    spot: Optional[float] = None
+    if Cols.UNDERLYING_PRICE in expiry_df.columns:
+        spot_series = expiry_df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
+        if len(spot_series) > 0:
+            spot = float(spot_series.head(1).item())
+
+    if spot is not None and spot > 0:
+        if (K0 < 0.5 * spot) or (K0 > 1.5 * spot):
+            raise ValueError(f"K0_OUT_OF_RANGE spot={spot:.4f} K0={K0:.4f} F={float(F):.4f}")
+
+    if K0 <= 0:
+        raise ValueError(f"INVALID_K0 K0={K0}")
+
+    # Forward should be reasonably close to K0 (VIX expects K0 to be the strike just below F)
+    if abs(float(F) / K0 - 1.0) > 0.25:
+        raise ValueError(f"FAR_FORWARD_FROM_K0 F={float(F):.4f} K0={K0:.4f} ratio={float(F)/K0:.4f}")
     
     # Get DTE from data if not provided
     if dte is None:
