@@ -68,6 +68,13 @@ def build_otm_strip(
     # Sort by strike
     df = expiry_df.sort(Cols.STRIKE)
 
+    # Spot/underlying price (used for sanity filtering)
+    spot: Optional[float] = None
+    if Cols.UNDERLYING_PRICE in df.columns:
+        spot_series = df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
+        if len(spot_series) > 0:
+            spot = float(spot_series.head(1).item())
+
     # -------------------------------------------------------------------------
     # Strike sanity guard (single-stock chains can contain extreme deep-tail
     # strikes with spurious/non-sense quotes that dominate the 1/K^2 weighting).
@@ -79,22 +86,41 @@ def build_otm_strip(
     # For index-like underlyings (e.g. SPY), this filter usually has no effect
     # because strike ranges are already reasonable.
     # -------------------------------------------------------------------------
-    if Cols.UNDERLYING_PRICE in df.columns:
-        spot_series = df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
-        if len(spot_series) > 0:
-            spot = float(spot_series.head(1).item())
-            if spot > 0:
-                min_moneyness = 0.20
-                max_moneyness = 5.00
-                strike_min_guard = spot * min_moneyness
-                strike_max_guard = spot * max_moneyness
+    if spot is not None and spot > 0:
+        min_moneyness = 0.20
+        max_moneyness = 5.00
+        strike_min_guard = spot * min_moneyness
+        strike_max_guard = spot * max_moneyness
 
-                # Apply only if the chain includes extreme strikes (otherwise no-op)
-                if (df[Cols.STRIKE].min() < strike_min_guard) or (df[Cols.STRIKE].max() > strike_max_guard):
-                    df = df.filter(
-                        (pl.col(Cols.STRIKE) >= strike_min_guard)
-                        & (pl.col(Cols.STRIKE) <= strike_max_guard)
-                    )
+        # Apply only if the chain includes extreme strikes (otherwise no-op)
+        if (df[Cols.STRIKE].min() < strike_min_guard) or (df[Cols.STRIKE].max() > strike_max_guard):
+            df = df.filter(
+                (pl.col(Cols.STRIKE) >= strike_min_guard)
+                & (pl.col(Cols.STRIKE) <= strike_max_guard)
+            )
+
+        # Put-call parity sanity across strikes:
+        # For rows with both C and P mids, implied forward should be close to spot.
+        # This catches split/nonstandard-contract issues where strikes/quotes are
+        # on a different scale than the reported underlying price.
+        has_pair = (
+            pl.col(Cols.C_MID).is_not_null()
+            & pl.col(Cols.P_MID).is_not_null()
+            & pl.col(Cols.C_MID).is_not_nan()
+            & pl.col(Cols.P_MID).is_not_nan()
+            & (pl.col(Cols.C_MID) > 0)
+            & (pl.col(Cols.P_MID) > 0)
+        )
+        implied_forward = pl.col(Cols.STRIKE) + (pl.col(Cols.C_MID) - pl.col(Cols.P_MID))
+        df = df.filter(
+            (~has_pair)
+            | (
+                implied_forward.is_between(
+                    pl.lit(spot * 0.5),
+                    pl.lit(spot * 1.5),
+                )
+            )
+        )
     
     # Build OTM quote column:
     # - K < K0: use P_MID
@@ -117,6 +143,24 @@ def build_otm_strip(
         .alias("otm_bid"),
     )
     
+    # No-arbitrage bounds sanity filter for OTM quotes:
+    # - OTM call (K > K0): 0 <= C <= S
+    # - OTM put  (K < K0): 0 <= P <= K
+    #
+    # This catches corporate-action / split-related data issues where the strike
+    # scale and quoted premiums are inconsistent with the underlying price
+    # (e.g., OTM calls priced above spot).
+    if spot is not None and spot > 0:
+        eps = 1e-3  # allow tiny numerical/rounding noise
+        df = df.with_columns(
+            pl.when(pl.col(Cols.STRIKE) < k0)
+            .then(pl.col(Cols.STRIKE) * (1.0 + eps))      # put upper bound ~ K
+            .when(pl.col(Cols.STRIKE) > k0)
+            .then(pl.lit(spot) * (1.0 + eps))             # call upper bound ~ S
+            .otherwise(pl.lit(min(spot, k0)) * (1.0 + eps))
+            .alias("_otm_upper_bound")
+        ).filter(pl.col("otm_quote") <= pl.col("_otm_upper_bound"))
+
     # Filter out rows with null/nan OTM quotes
     df = df.filter(
         pl.col("otm_quote").is_not_null() &

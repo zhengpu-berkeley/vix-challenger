@@ -4,7 +4,13 @@ This document describes the Cboe VIX-style model-free variance calculation imple
 
 ## Overview
 
-The VIX index measures the market's expectation of 30-day volatility implied by S&P 500 (SPX) index option prices. Our implementation adapts this methodology to SPY (S&P 500 ETF) options.
+The VIX index measures the market's expectation of 30-day volatility implied by S&P 500 (SPX) index option prices. Our implementation adapts this methodology to **equity/ETF options** (SPY, AAPL, TSLA, NVDA) using end-of-day option chains.
+
+Because single-stock chains (and some Kaggle datasets) can contain **real-world data issues** that violate the assumptions of the VIX white paper, the implementation includes **robustness filters** and **explicit QC outputs** to prevent artificial spikes caused by:
+
+- Illiquid / placeholder quotes (e.g., **bid=0**, wide ask, midquote looks “valid”)
+- Broken strike ladders (missing strikes near spot/forward)
+- Corporate actions / nonstandard contracts (e.g., **stock split day** where strike/quote scale mismatches underlying price)
 
 ## References
 
@@ -30,6 +36,8 @@ For each expiration, compute the forward price using put-call parity:
    K* = argmin |C_mid(K) - P_mid(K)|
    ```
 
+   **Robustness note (important for equities):** in practice, we do *not* search over all strikes blindly. Some chains contain extreme tail strikes (e.g., 1–10 when spot is in the hundreds) with bid=0 and wide asks; these can artificially minimize \(|C-P|\) and produce absurd forwards. We therefore apply a **moneyness-restricted search** around spot first (with fallbacks).
+
 2. Compute the forward price:
 
    ```
@@ -45,6 +53,8 @@ For each expiration, compute the forward price using put-call parity:
    ```
    K0 = max{K : K ≤ F}
    ```
+
+   **Robustness note:** `K0` is computed against the **full strike set** for the expiry (not only the parity-candidate subset). We also enforce **sanity checks** downstream to ensure `K0` is close to spot and close to `F` (see “Implementation Notes” and “Diagnostics”).
 
 ## Step 3: Build OTM Strip
 
@@ -64,6 +74,26 @@ Apply the "two consecutive zero-bid" cutoff on each wing:
 - **Call wing**: Starting from K0 and moving to higher strikes, exclude all strikes above (and including) the first pair of consecutive strikes with zero bid.
 
 This prevents deep OTM options with no liquidity from distorting the variance calculation.
+
+### Additional Robustness Filters (Single-Stock Chains)
+
+The official VIX methodology assumes a clean strike ladder and quotes consistent with no-arbitrage bounds. With single-stock EOD chains, we observed several pathologies that can create **artificial variance spikes** via the \(\Delta K / K^2\) weighting. We apply the following filters before building the final OTM strip:
+
+1. **Strike moneyness guard (tail strike suppression)**
+   - Keep strikes within a broad envelope around spot: \([0.20\times S,\; 5.00\times S]\)
+   - This prevents extreme tiny strikes (e.g., \(K=7\)) from dominating the variance integral.
+
+2. **No-arbitrage bounds on OTM midquotes**
+   - For OTM calls (\(K > K_0\)): enforce \(0 \le C_{mid} \le S\)
+   - For OTM puts (\(K < K_0\)): enforce \(0 \le P_{mid} \le K\)
+
+3. **Implied-forward consistency filter (split/nonstandard contract detection)**
+   - For rows with both call+put mids, compute implied forward:
+     \[
+     F_i = K + (C_{mid}(K) - P_{mid}(K))
+     \]
+   - Keep strikes where \(F_i \in [0.5\times S,\; 1.5\times S]\).
+   - This reliably catches corporate-action scale issues (e.g., on a split day, some strikes/quotes may be on a pre-split scale while the reported spot is post-split).
 
 ## Step 4: Compute Strike Spacing
 
@@ -99,6 +129,13 @@ Where:
 2. **Adjustment term**: `(1/T) × (F/K0 - 1)²`
    - Corrects for the discrete nature of strikes
    - Small when K0 is close to F
+
+### Variance Validity Checks (Practical)
+
+In theory, the model-free variance should be non-negative. In practice, **negative variance** usually indicates a broken chain (strike ladder gaps, scale mismatch, or bad quotes). We therefore:
+
+- **Reject** expiries where `K0` is far from spot (outside \([0.5S, 1.5S]\)) or where \(|F/K_0 - 1|\) is too large (broken ladder symptom).
+- **Do not** take `abs(variance)` when variance is negative. Large negative variance is treated as a **skip** for that day/expiry (otherwise it can create large artificial spikes after interpolation).
 
 ## Step 6: 30-Day Interpolation
 
@@ -141,4 +178,23 @@ Key sanity checks for each computation:
 2. **Implied vol in [5%, 150%]**: Typical range for equity volatility
 3. **K0 close to F**: Should differ by < 2%
 4. **Strikes on both wings**: Should have both OTM puts and calls
+
+### Explicit QC Outputs
+
+For each ticker, we write a per-day diagnostics parquet:
+
+- `data/processed/{ticker}_diagnostics.parquet`
+
+This includes day-level quote/spread/coverage stats *plus* expiry-level QC fields to debug spikes and skips:
+
+- **Strike ladder / gaps**: `*_spot_gap_pct_underlying`, `*_max_strike_gap_pct_underlying`, `*_forward_gap_pct_underlying`
+- **Parity sanity**: `*_parity_forward`, `*_parity_k0`, `*_parity_f_over_k0`, `*_parity_diff`
+- **Tail strike flags**: `*_strike_guard_applied`, `*_n_strikes_below_20pct_spot`, `*_n_strikes_above_5x_spot`
+- **Dominance checks (from the OTM strip integral)**: `*_top_contrib_frac`, `*_min_strike_contrib_frac`
+
+These QC fields were essential for diagnosing:
+
+- TSLA spikes driven by tiny strikes with bid=0 / wide asks (parity + \(\frac{1}{K^2}\) dominance)
+- TSLA days with broken strike ladders (e.g., \(K_0\) collapsing far below spot)
+- NVDA split-day scale mismatch (OTM calls priced above spot and implied-forward inconsistencies)
 

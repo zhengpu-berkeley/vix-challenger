@@ -22,7 +22,7 @@ This report summarizes the computation of VIX-like (model-free implied volatilit
 | SPY | 24.41 | 8.56 | 11.71 | 81.11 | 2020-2022 |
 | AAPL | 28.90 | 10.42 | 14.21 | 99.98 | 2016-2020 |
 | TSLA | 70.59 | 19.34 | 35.57 | 188.11 | 2019-2022 |
-| NVDA | 53.67 | 15.41 | 31.01 | 333.54 | 2020-2022 |
+| NVDA | 53.29 | 11.57 | 31.01 | 107.60 | 2020-2022 |
 
 *TSLA extreme spikes were traced to broken strike ladders / tail-strike dominance and are now handled via explicit QC and stricter validity checks.*
 
