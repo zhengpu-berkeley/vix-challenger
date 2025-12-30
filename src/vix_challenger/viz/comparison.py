@@ -1,6 +1,6 @@
-"""Visualization module for SPY VIX vs VIXCLS comparison.
+"""Visualization module for ticker VIX vs VIXCLS comparison.
 
-Generates publication-quality plots for the POC report.
+Generates publication-quality plots for comparison reports.
 """
 
 from pathlib import Path
@@ -16,11 +16,25 @@ from datetime import datetime
 # Style configuration
 plt.style.use('seaborn-v0_8-whitegrid')
 COLORS = {
-    "spy_vix": "#2E86AB",  # Blue
-    "vixcls": "#A23B72",   # Magenta
-    "residual": "#F18F01", # Orange
-    "rolling": "#C73E1D",  # Red
+    "ticker_vix": "#2E86AB",  # Blue
+    "vixcls": "#A23B72",      # Magenta
+    "residual": "#F18F01",    # Orange
+    "rolling": "#C73E1D",     # Red
 }
+
+
+def _get_ticker_col(df: pl.DataFrame) -> tuple[str, str]:
+    """Get the ticker VIX column name and ticker symbol from the dataframe.
+    
+    Returns:
+        Tuple of (column_name, ticker_symbol)
+    """
+    for col in df.columns:
+        if col.endswith("_vix") and col != "vixcls":
+            ticker = col.replace("_vix", "").upper()
+            return col, ticker
+    # Fallback to spy_vix for backwards compatibility
+    return "spy_vix", "SPY"
 
 
 def plot_overlay(
@@ -28,30 +42,37 @@ def plot_overlay(
     save_path: Optional[Path] = None,
     figsize: tuple = (14, 6),
 ) -> plt.Figure:
-    """Plot overlay of SPY_VIX and VIXCLS time series.
+    """Plot overlay of ticker VIX and VIXCLS time series.
     
     Args:
-        df: DataFrame with date, spy_vix, vixcls columns
+        df: DataFrame with date, {ticker}_vix, vixcls columns
         save_path: If provided, save figure to this path
         figsize: Figure size
         
     Returns:
         matplotlib Figure
     """
+    ticker_col, ticker = _get_ticker_col(df)
+    
     fig, ax = plt.subplots(figsize=figsize)
     
     dates = df["date"].to_list()
-    spy_vix = df["spy_vix"].to_numpy()
+    ticker_vix = df[ticker_col].to_numpy()
     vixcls = df["vixcls"].to_numpy()
     
-    ax.plot(dates, spy_vix, color=COLORS["spy_vix"], linewidth=1.5, 
-            label="SPY VIX-like", alpha=0.9)
+    ax.plot(dates, ticker_vix, color=COLORS["ticker_vix"], linewidth=1.5, 
+            label=f"{ticker} VIX-like", alpha=0.9)
     ax.plot(dates, vixcls, color=COLORS["vixcls"], linewidth=1.5, 
             label="VIXCLS (FRED)", alpha=0.9)
     
     ax.set_xlabel("Date", fontsize=12)
     ax.set_ylabel("Volatility Index", fontsize=12)
-    ax.set_title("SPY-based VIX vs Official VIXCLS (2020-2022)", fontsize=14, fontweight="bold")
+    
+    # Get date range
+    date_start = dates[0].strftime("%Y") if hasattr(dates[0], 'strftime') else str(dates[0])[:4]
+    date_end = dates[-1].strftime("%Y") if hasattr(dates[-1], 'strftime') else str(dates[-1])[:4]
+    ax.set_title(f"{ticker}-based VIX vs Official VIXCLS ({date_start}-{date_end})", 
+                 fontsize=14, fontweight="bold")
     ax.legend(loc="upper right", fontsize=11)
     
     # Format x-axis
@@ -59,18 +80,18 @@ def plot_overlay(
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.xticks(rotation=45)
     
-    # Add annotation for COVID peak
-    covid_peak_idx = np.argmax(vixcls)
+    # Add annotation for peak
+    peak_idx = np.argmax(vixcls)
     ax.annotate(
-        f"COVID Peak\n{vixcls[covid_peak_idx]:.1f}",
-        xy=(dates[covid_peak_idx], vixcls[covid_peak_idx]),
-        xytext=(dates[covid_peak_idx], vixcls[covid_peak_idx] + 10),
+        f"Peak\n{vixcls[peak_idx]:.1f}",
+        xy=(dates[peak_idx], vixcls[peak_idx]),
+        xytext=(dates[peak_idx], vixcls[peak_idx] + 10),
         fontsize=9,
         ha="center",
         arrowprops=dict(arrowstyle="->", color="gray", alpha=0.7),
     )
     
-    ax.set_ylim(0, max(spy_vix.max(), vixcls.max()) * 1.15)
+    ax.set_ylim(0, max(ticker_vix.max(), vixcls.max()) * 1.15)
     
     plt.tight_layout()
     
@@ -87,10 +108,10 @@ def plot_scatter(
     save_path: Optional[Path] = None,
     figsize: tuple = (8, 8),
 ) -> plt.Figure:
-    """Plot scatter of SPY_VIX vs VIXCLS with regression line.
+    """Plot scatter of ticker VIX vs VIXCLS with regression line.
     
     Args:
-        df: DataFrame with spy_vix, vixcls columns
+        df: DataFrame with {ticker}_vix, vixcls columns
         metrics: Dictionary with regression_alpha, regression_beta
         save_path: If provided, save figure to this path
         figsize: Figure size
@@ -98,13 +119,15 @@ def plot_scatter(
     Returns:
         matplotlib Figure
     """
+    ticker_col, ticker = _get_ticker_col(df)
+    
     fig, ax = plt.subplots(figsize=figsize)
     
-    spy_vix = df["spy_vix"].to_numpy()
+    ticker_vix = df[ticker_col].to_numpy()
     vixcls = df["vixcls"].to_numpy()
     
     # Scatter plot
-    ax.scatter(vixcls, spy_vix, alpha=0.4, s=20, color=COLORS["spy_vix"], 
+    ax.scatter(vixcls, ticker_vix, alpha=0.4, s=20, color=COLORS["ticker_vix"], 
                edgecolors="none")
     
     # Regression line
@@ -114,13 +137,13 @@ def plot_scatter(
             label=f"y = {metrics['regression_alpha']:.2f} + {metrics['regression_beta']:.2f}x")
     
     # 45-degree reference line
-    max_val = max(spy_vix.max(), vixcls.max())
+    max_val = max(ticker_vix.max(), vixcls.max())
     ax.plot([0, max_val], [0, max_val], color="gray", linestyle="--", 
             linewidth=1, alpha=0.7, label="y = x (perfect match)")
     
     ax.set_xlabel("VIXCLS (Official)", fontsize=12)
-    ax.set_ylabel("SPY VIX-like", fontsize=12)
-    ax.set_title(f"Scatter: SPY VIX vs VIXCLS\n(r = {metrics['correlation']:.4f})", 
+    ax.set_ylabel(f"{ticker} VIX-like", fontsize=12)
+    ax.set_title(f"Scatter: {ticker} VIX vs VIXCLS\n(r = {metrics['correlation']:.4f})", 
                  fontsize=14, fontweight="bold")
     ax.legend(loc="upper left", fontsize=10)
     
@@ -142,7 +165,7 @@ def plot_residuals(
     save_path: Optional[Path] = None,
     figsize: tuple = (14, 5),
 ) -> plt.Figure:
-    """Plot residuals (SPY_VIX - VIXCLS) over time.
+    """Plot residuals (ticker_VIX - VIXCLS) over time.
     
     Args:
         df: DataFrame with date, residual columns
@@ -152,13 +175,15 @@ def plot_residuals(
     Returns:
         matplotlib Figure
     """
+    ticker_col, ticker = _get_ticker_col(df)
+    
     fig, ax = plt.subplots(figsize=figsize)
     
     dates = df["date"].to_list()
     residuals = df["residual"].to_numpy()
     
     # Bar chart for residuals
-    colors = [COLORS["spy_vix"] if r >= 0 else COLORS["vixcls"] for r in residuals]
+    colors = [COLORS["ticker_vix"] if r >= 0 else COLORS["vixcls"] for r in residuals]
     ax.bar(dates, residuals, color=colors, alpha=0.7, width=1)
     
     # Zero line
@@ -170,7 +195,7 @@ def plot_residuals(
                label=f"Mean bias: {mean_bias:+.2f}")
     
     ax.set_xlabel("Date", fontsize=12)
-    ax.set_ylabel("Residual (SPY_VIX - VIXCLS)", fontsize=12)
+    ax.set_ylabel(f"Residual ({ticker}_VIX - VIXCLS)", fontsize=12)
     ax.set_title("Residuals Over Time", fontsize=14, fontweight="bold")
     ax.legend(loc="upper right", fontsize=10)
     
@@ -203,6 +228,8 @@ def plot_rolling_correlation(
     Returns:
         matplotlib Figure
     """
+    ticker_col, ticker = _get_ticker_col(df)
+    
     fig, ax = plt.subplots(figsize=figsize)
     
     # Filter out NaN values
@@ -219,12 +246,12 @@ def plot_rolling_correlation(
                label="0.9 threshold")
     
     mean_corr = np.nanmean(rolling_corr)
-    ax.axhline(mean_corr, color=COLORS["spy_vix"], linewidth=2, linestyle="--",
+    ax.axhline(mean_corr, color=COLORS["ticker_vix"], linewidth=2, linestyle="--",
                label=f"Mean: {mean_corr:.4f}")
     
     ax.set_xlabel("Date", fontsize=12)
     ax.set_ylabel("Rolling 60-Day Correlation", fontsize=12)
-    ax.set_title("Rolling Correlation: SPY VIX vs VIXCLS", fontsize=14, fontweight="bold")
+    ax.set_title(f"Rolling Correlation: {ticker} VIX vs VIXCLS", fontsize=14, fontweight="bold")
     ax.legend(loc="lower right", fontsize=10)
     
     ax.set_ylim(0.8, 1.02)
@@ -258,6 +285,8 @@ def plot_rolling_beta(
     Returns:
         matplotlib Figure
     """
+    ticker_col, ticker = _get_ticker_col(df)
+    
     fig, ax = plt.subplots(figsize=figsize)
     
     # Filter out NaN values
@@ -272,12 +301,12 @@ def plot_rolling_beta(
     ax.axhline(1.0, color="black", linewidth=1.5, linestyle="--", label="β = 1 (perfect)")
     
     mean_beta = np.nanmean(rolling_beta)
-    ax.axhline(mean_beta, color=COLORS["spy_vix"], linewidth=2, linestyle="--",
+    ax.axhline(mean_beta, color=COLORS["ticker_vix"], linewidth=2, linestyle="--",
                label=f"Mean: {mean_beta:.4f}")
     
     ax.set_xlabel("Date", fontsize=12)
     ax.set_ylabel("Rolling 60-Day Beta", fontsize=12)
-    ax.set_title("Rolling Regression Beta: SPY VIX vs VIXCLS", fontsize=14, fontweight="bold")
+    ax.set_title(f"Rolling Regression Beta: {ticker} VIX vs VIXCLS", fontsize=14, fontweight="bold")
     ax.legend(loc="upper right", fontsize=10)
     
     ax.set_ylim(0.8, 1.2)
@@ -338,4 +367,3 @@ def generate_all_plots(
     plt.close("all")
     
     return plots
-

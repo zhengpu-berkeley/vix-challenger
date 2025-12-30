@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""Compute VIX-like index for all trading days 2020-2022.
-
-This script:
-1. Loads each day's partitioned parquet data
-2. Computes the VIX-like index using 30-day interpolation
-3. Collects diagnostics and QC metrics
-4. Saves results to parquet files
+"""Compute VIX-like index for all trading days of a ticker.
 
 Usage:
-    uv run python scripts/02_compute_vix_like.py
-    uv run python scripts/02_compute_vix_like.py --limit 50  # First 50 days only
-    uv run python scripts/02_compute_vix_like.py --start 2021-01-01 --end 2021-01-31
+    uv run python scripts/02_compute_vix_like.py                    # SPY (default)
+    uv run python scripts/02_compute_vix_like.py --ticker SPY
+    uv run python scripts/02_compute_vix_like.py --ticker AAPL
+    uv run python scripts/02_compute_vix_like.py --limit 50         # First 50 days
 """
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 # Add src to path for imports
@@ -25,10 +20,9 @@ import polars as pl
 from tqdm import tqdm
 
 from vix_challenger.config import (
-    SPY_OPTIONS_BY_DATE,
-    SPY_VIX_LIKE_PARQUET,
-    DIAGNOSTICS_PARQUET,
-    ensure_directories,
+    get_ticker_config,
+    list_tickers,
+    ensure_ticker_directories,
 )
 from vix_challenger.vix import (
     compute_daily_vix,
@@ -56,20 +50,16 @@ def load_day_data(data_dir: Path, quote_date: date) -> pl.DataFrame:
 
 
 def run_pipeline(
-    data_dir: Path,
-    output_path: Path,
-    diagnostics_path: Path,
+    ticker: str,
     start_date: date = None,
     end_date: date = None,
     limit: int = None,
     verbose: bool = False,
 ) -> dict:
-    """Run VIX computation pipeline on all trading days.
+    """Run VIX computation pipeline for a ticker.
     
     Args:
-        data_dir: Directory with partitioned parquet data
-        output_path: Path to save spy_vix_like.parquet
-        diagnostics_path: Path to save diagnostics.parquet
+        ticker: Ticker symbol
         start_date: Start date filter (inclusive)
         end_date: End date filter (inclusive)
         limit: Maximum number of days to process
@@ -78,11 +68,22 @@ def run_pipeline(
     Returns:
         Dictionary with pipeline statistics
     """
-    ensure_directories()
+    config = get_ticker_config(ticker)
+    ensure_ticker_directories(ticker)
+    
+    data_dir = config.options_by_date_dir
+    output_path = config.vix_like_parquet
+    diagnostics_path = config.diagnostics_parquet
+    
+    if not data_dir.exists():
+        raise FileNotFoundError(
+            f"Data directory not found: {data_dir}\n"
+            f"Run scripts/01_convert_csv.py --ticker {ticker} first."
+        )
     
     # Get available dates
     all_dates = get_available_dates(data_dir)
-    print(f"Found {len(all_dates)} trading days")
+    print(f"Found {len(all_dates)} trading days for {ticker}")
     print(f"Date range: {all_dates[0]} to {all_dates[-1]}")
     
     # Apply filters
@@ -95,23 +96,18 @@ def run_pipeline(
         dates = dates[:limit]
     
     print(f"Processing {len(dates)} days")
-    if start_date or end_date:
-        print(f"Date filter: {start_date or 'start'} to {end_date or 'end'}")
     
     # Process each day
     results = []
     qc_metrics = []
     
-    for quote_date in tqdm(dates, desc="Computing VIX"):
+    for quote_date in tqdm(dates, desc=f"Computing {ticker} VIX"):
         try:
-            # Load data
             day_df = load_day_data(data_dir, quote_date)
             
-            # Compute VIX
             result = compute_daily_vix(day_df, quote_date)
             results.append(result)
             
-            # Compute QC metrics
             qc = compute_day_qc_metrics(day_df, quote_date)
             qc_metrics.append(qc)
             
@@ -120,7 +116,6 @@ def run_pipeline(
             
         except Exception as e:
             print(f"ERROR on {quote_date}: {e}")
-            # Create a failed result
             from vix_challenger.vix import DailyVIXResult
             result = DailyVIXResult(
                 quote_date=quote_date,
@@ -129,9 +124,17 @@ def run_pipeline(
             )
             results.append(result)
     
-    # Convert to DataFrames
-    results_df = pl.DataFrame([result_to_dict(r) for r in results])
-    qc_df = pl.DataFrame([qc_metrics_to_dict(q) for q in qc_metrics])
+    # Convert to DataFrames and add ticker column
+    results_data = [result_to_dict(r) for r in results]
+    for row in results_data:
+        row["ticker"] = ticker
+    # Use infer_schema_length=None to scan all rows (handles mixed None/string types)
+    results_df = pl.DataFrame(results_data, infer_schema_length=None)
+    
+    qc_data = [qc_metrics_to_dict(q) for q in qc_metrics]
+    for row in qc_data:
+        row["ticker"] = ticker
+    qc_df = pl.DataFrame(qc_data, infer_schema_length=None)
     
     # Save results
     print(f"\nSaving results to {output_path}")
@@ -147,10 +150,8 @@ def run_pipeline(
     
     skip_reasons = summarize_skip_reasons(results)
     
-    # Get successful results for stats
-    successful_results = [r for r in results if r.success]
-    
     stats = {
+        "ticker": ticker,
         "total_days": len(dates),
         "successful": n_success,
         "failed": n_failed,
@@ -158,6 +159,7 @@ def run_pipeline(
         "skip_reasons": skip_reasons,
     }
     
+    successful_results = [r for r in results if r.success]
     if successful_results:
         indices = [r.index for r in successful_results]
         stats["index_min"] = min(indices)
@@ -170,7 +172,7 @@ def run_pipeline(
 def print_summary(stats: dict):
     """Print pipeline summary statistics."""
     print("\n" + "=" * 60)
-    print("PIPELINE SUMMARY")
+    print(f"PIPELINE SUMMARY - {stats['ticker']}")
     print("=" * 60)
     
     print(f"\n[Processing Stats]")
@@ -195,71 +197,42 @@ def print_summary(stats: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute VIX-like index for all trading days"
+        description="Compute VIX-like index for a ticker"
     )
     parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=SPY_OPTIONS_BY_DATE,
-        help="Directory with partitioned parquet data"
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=SPY_VIX_LIKE_PARQUET,
-        help="Output path for VIX results"
-    )
-    parser.add_argument(
-        "--diagnostics",
-        type=Path,
-        default=DIAGNOSTICS_PARQUET,
-        help="Output path for diagnostics"
-    )
-    parser.add_argument(
-        "--start",
+        "--ticker",
         type=str,
-        help="Start date (YYYY-MM-DD)"
+        default="SPY",
+        help=f"Ticker symbol. Available: {', '.join(list_tickers())}"
     )
-    parser.add_argument(
-        "--end",
-        type=str,
-        help="End date (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        help="Maximum number of days to process"
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Verbose output"
-    )
+    parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--limit", type=int, help="Max days to process")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     args = parser.parse_args()
     
-    # Parse dates
+    ticker = args.ticker.upper()
     start_date = date.fromisoformat(args.start) if args.start else None
     end_date = date.fromisoformat(args.end) if args.end else None
     
-    # Run pipeline
-    stats = run_pipeline(
-        data_dir=args.data_dir,
-        output_path=args.output,
-        diagnostics_path=args.diagnostics,
-        start_date=start_date,
-        end_date=end_date,
-        limit=args.limit,
-        verbose=args.verbose,
-    )
-    
-    print_summary(stats)
-    
-    # Exit with error if too many failures
-    if stats['success_rate'] < 50:
-        print("\nWARNING: Success rate below 50%!")
+    try:
+        stats = run_pipeline(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            limit=args.limit,
+            verbose=args.verbose,
+        )
+        print_summary(stats)
+        
+        if stats['success_rate'] < 50:
+            print("\nWARNING: Success rate below 50%!")
+            sys.exit(1)
+            
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

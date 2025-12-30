@@ -72,19 +72,80 @@ def compute_forward_price(
     # Time to expiry in years
     T = dte / 365.0
     
-    # Filter for strikes with valid call and put midquotes
-    valid_df = expiry_df.filter(
-        pl.col(Cols.C_MID).is_not_null() & 
-        pl.col(Cols.P_MID).is_not_null() &
-        pl.col(Cols.C_MID).is_not_nan() &
-        pl.col(Cols.P_MID).is_not_nan() &
-        (pl.col(Cols.C_MID) > 0) &
-        (pl.col(Cols.P_MID) > 0)
-    ).sort(Cols.STRIKE)
-    
-    n_valid = len(valid_df)
-    if n_valid == 0:
+    # Spot/underlying price (used only as a robustness guard for parity selection).
+    #
+    # Some equity option chains can contain spurious extreme strikes (e.g., 1–10)
+    # with illiquid/placeholder quotes (e.g., bid=0, wide ask). If we globally
+    # minimize |C_mid - P_mid|, those rows can incorrectly win and yield an
+    # absurd forward (F) and ATM strike (K0), which then blows up the variance
+    # via the 1/K^2 term.
+    spot: Optional[float] = None
+    if Cols.UNDERLYING_PRICE in expiry_df.columns:
+        spot_series = expiry_df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
+        if len(spot_series) > 0:
+            spot = float(spot_series.head(1).item())
+
+    base_filter = (
+        pl.col(Cols.C_MID).is_not_null()
+        & pl.col(Cols.P_MID).is_not_null()
+        & pl.col(Cols.C_MID).is_not_nan()
+        & pl.col(Cols.P_MID).is_not_nan()
+        & (pl.col(Cols.C_MID) > 0)
+        & (pl.col(Cols.P_MID) > 0)
+    )
+
+    bid_filter = (
+        pl.col(Cols.C_BID).is_not_null()
+        & pl.col(Cols.P_BID).is_not_null()
+        & pl.col(Cols.C_BID).is_not_nan()
+        & pl.col(Cols.P_BID).is_not_nan()
+        & (pl.col(Cols.C_BID) > 0)
+        & (pl.col(Cols.P_BID) > 0)
+    )
+
+    def _filtered_valid_df(
+        *,
+        require_bids: bool,
+        moneyness_lo: Optional[float],
+        moneyness_hi: Optional[float],
+    ) -> pl.DataFrame:
+        df = expiry_df.filter(base_filter)
+        if require_bids and (Cols.C_BID in expiry_df.columns) and (Cols.P_BID in expiry_df.columns):
+            df = df.filter(bid_filter)
+        if spot is not None and moneyness_lo is not None and moneyness_hi is not None:
+            df = df.filter(
+                (pl.col(Cols.STRIKE) >= spot * moneyness_lo)
+                & (pl.col(Cols.STRIKE) <= spot * moneyness_hi)
+            )
+        return df.sort(Cols.STRIKE)
+
+    # Try progressively more permissive filters until we have at least one valid pair.
+    #
+    # Order matters: start tight around spot (typical for K*), then widen, then fall back.
+    candidates: list[tuple[bool, Optional[float], Optional[float]]] = []
+    if spot is not None and spot > 0:
+        candidates += [
+            (True, 0.8, 1.2),
+            (False, 0.8, 1.2),
+            (True, 0.5, 1.5),
+            (False, 0.5, 1.5),
+        ]
+    candidates += [
+        (True, None, None),
+        (False, None, None),
+    ]
+
+    valid_df: Optional[pl.DataFrame] = None
+    for require_bids, m_lo, m_hi in candidates:
+        df_try = _filtered_valid_df(require_bids=require_bids, moneyness_lo=m_lo, moneyness_hi=m_hi)
+        if len(df_try) > 0:
+            valid_df = df_try
+            break
+
+    if valid_df is None or len(valid_df) == 0:
         raise ValueError("No valid strikes with both call and put midquotes")
+
+    n_valid = len(valid_df)
     
     # Compute parity difference: |C_mid - P_mid|
     valid_df = valid_df.with_columns(
@@ -105,8 +166,15 @@ def compute_forward_price(
     exp_rT = np.exp(r * T) if T > 0 else 1.0
     forward = k_star + exp_rT * (c_mid_k_star - p_mid_k_star)
     
-    # K0 = max strike where strike <= F
-    strikes = valid_df[Cols.STRIKE].to_numpy()
+    # K0 = max strike where strike <= F (use all strikes, not just the filtered parity set)
+    strikes = (
+        expiry_df[Cols.STRIKE]
+        .drop_nulls()
+        .drop_nans()
+        .unique()
+        .to_numpy()
+    )
+    strikes = np.sort(strikes)
     strikes_below_f = strikes[strikes <= forward]
     
     if len(strikes_below_f) == 0:

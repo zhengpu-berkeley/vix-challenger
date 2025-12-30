@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Convert SPY options CSV to partitioned parquet files.
+"""Convert options CSV to partitioned parquet files for a ticker.
 
 Partitions by quote_date for efficient daily access:
-  data/processed/spy_options_by_date/quote_date=YYYY-MM-DD/*.parquet
+  data/processed/{ticker}_options_by_date/quote_date=YYYY-MM-DD/*.parquet
 
 Usage:
-    uv run python scripts/01_convert_csv.py
-    uv run python scripts/01_convert_csv.py --csv data/raw/spy_2020_2022.csv --out data/processed/spy_options_by_date
+    uv run python scripts/01_convert_csv.py                    # SPY (default)
+    uv run python scripts/01_convert_csv.py --ticker SPY
+    uv run python scripts/01_convert_csv.py --ticker AAPL
 """
 
 import argparse
@@ -20,29 +21,39 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import polars as pl
 from tqdm import tqdm
 
-from vix_challenger.config import SPY_RAW_CSV, SPY_OPTIONS_BY_DATE, ensure_directories
-from vix_challenger.io.spy_csv import scan_spy_csv, Cols
+from vix_challenger.config import (
+    get_ticker_config,
+    list_tickers,
+    ensure_ticker_directories,
+)
+from vix_challenger.io.options_loader import scan_options_csv, Cols
 
 
 def convert_csv_to_partitioned_parquet(
-    csv_path: Path,
-    output_dir: Path,
+    ticker: str,
     overwrite: bool = True,
 ) -> dict:
-    """Convert CSV to partitioned parquet files.
+    """Convert CSV to partitioned parquet files for a ticker.
     
     Args:
-        csv_path: Path to input CSV
-        output_dir: Directory for partitioned output
+        ticker: Ticker symbol
         overwrite: If True, remove existing output directory first
         
     Returns:
         Dictionary with conversion statistics
     """
-    ensure_directories()
+    config = get_ticker_config(ticker)
+    ensure_ticker_directories(ticker)
     
+    csv_path = config.raw_csv_path
+    output_dir = config.options_by_date_dir
+    
+    print(f"Ticker: {ticker}")
     print(f"Input CSV: {csv_path}")
     print(f"Output dir: {output_dir}")
+    
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}. Run download_data.py --ticker {ticker} first.")
     
     # Remove existing output if overwriting
     if overwrite and output_dir.exists():
@@ -53,7 +64,7 @@ def convert_csv_to_partitioned_parquet(
     
     # Load and process the data
     print("\nScanning CSV...")
-    lf = scan_spy_csv(csv_path)
+    lf = scan_options_csv(csv_path, ticker=ticker)
     
     # Get unique dates for progress bar
     print("Getting unique dates...")
@@ -78,10 +89,10 @@ def convert_csv_to_partitioned_parquet(
     print("\nWriting partitioned parquet files...")
     
     stats = {
+        "ticker": ticker,
         "total_dates": len(unique_dates),
         "total_rows": len(df),
         "rows_per_date": {},
-        "errors": [],
     }
     
     for date in tqdm(unique_dates, desc="Partitioning"):
@@ -100,7 +111,7 @@ def convert_csv_to_partitioned_parquet(
     
     # Summary
     print("\n" + "=" * 60)
-    print("CONVERSION COMPLETE")
+    print(f"CONVERSION COMPLETE - {ticker}")
     print("=" * 60)
     print(f"Output directory: {output_dir}")
     print(f"Total partitions: {len(unique_dates)}")
@@ -108,35 +119,31 @@ def convert_csv_to_partitioned_parquet(
     
     # Verify by reading one partition
     print("\nVerifying by reading a sample partition...")
-    sample_date = unique_dates[len(unique_dates) // 2]  # Pick a middle date
+    sample_date = unique_dates[len(unique_dates) // 2]
     sample_dir = output_dir / f"quote_date={sample_date.strftime('%Y-%m-%d')}"
     sample_df = pl.read_parquet(sample_dir / "data.parquet")
     print(f"Sample date: {sample_date}")
     print(f"Rows: {len(sample_df)}")
-    print(f"Columns: {sample_df.columns}")
     
-    # Show a few rows
-    print("\nSample data:")
-    print(sample_df.head(3))
+    # Check read time
+    import time
+    start = time.time()
+    _ = pl.read_parquet(sample_dir / "data.parquet")
+    elapsed = time.time() - start
+    print(f"Read time: {elapsed*1000:.1f}ms")
     
     return stats
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert SPY options CSV to partitioned parquet"
+        description="Convert options CSV to partitioned parquet"
     )
     parser.add_argument(
-        "--csv",
-        type=Path,
-        default=SPY_RAW_CSV,
-        help="Path to input CSV file"
-    )
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=SPY_OPTIONS_BY_DATE,
-        help="Output directory for partitioned parquet"
+        "--ticker",
+        type=str,
+        default="SPY",
+        help=f"Ticker symbol. Available: {', '.join(list_tickers())}"
     )
     parser.add_argument(
         "--no-overwrite",
@@ -145,38 +152,18 @@ def main():
     )
     args = parser.parse_args()
     
-    if not args.csv.exists():
-        print(f"ERROR: CSV file not found: {args.csv}")
-        print("Run scripts/download_data.py first.")
+    ticker = args.ticker.upper()
+    
+    try:
+        stats = convert_csv_to_partitioned_parquet(
+            ticker=ticker,
+            overwrite=not args.no_overwrite,
+        )
+        print(f"\n✓ {ticker} conversion successful!")
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
-    
-    stats = convert_csv_to_partitioned_parquet(
-        csv_path=args.csv,
-        output_dir=args.out,
-        overwrite=not args.no_overwrite,
-    )
-    
-    # Check acceptance criteria
-    print("\n" + "=" * 60)
-    print("ACCEPTANCE CRITERIA CHECK")
-    print("=" * 60)
-    
-    # 1. Partitions exist
-    partitions = list(args.out.glob("quote_date=*"))
-    print(f"✓ Partitions created: {len(partitions)}")
-    
-    # 2. Reading one day is fast
-    import time
-    sample_partition = partitions[len(partitions) // 2]
-    start = time.time()
-    _ = pl.read_parquet(sample_partition / "data.parquet")
-    elapsed = time.time() - start
-    if elapsed < 1.0:
-        print(f"✓ Read time: {elapsed*1000:.1f}ms (< 1s)")
-    else:
-        print(f"✗ Read time: {elapsed:.2f}s (should be < 1s)")
 
 
 if __name__ == "__main__":
     main()
-
