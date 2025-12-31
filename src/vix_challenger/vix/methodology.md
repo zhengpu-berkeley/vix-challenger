@@ -95,6 +95,49 @@ The official VIX methodology assumes a clean strike ladder and quotes consistent
    - Keep strikes where \(F_i \in [0.5\times S,\; 1.5\times S]\).
    - This reliably catches corporate-action scale issues (e.g., on a split day, some strikes/quotes may be on a pre-split scale while the reported spot is post-split).
 
+### Stock Split Awareness
+
+The implementation includes explicit handling for stock split events via metadata files stored in `data/raw/{ticker}_stock_splits.json`. This addresses a common issue where options data around split dates may contain stale/unadjusted strikes.
+
+**Metadata Loading:**
+
+Split metadata is loaded from JSON files with the following structure:
+
+```json
+{
+  "ticker": "NVDA",
+  "split_ratio": 4.0,
+  "split_date": "2021-07-20",
+  "company": "NVIDIA Corporation",
+  "source": "NVIDIA news release"
+}
+```
+
+**Split-Aware Processing:**
+
+For each trading day, the pipeline:
+
+1. **Checks proximity to splits**: Uses `is_near_split(ticker, quote_date, window_days=10)` to detect if the quote date is within 10 days of a known split.
+
+2. **Filters absurd strikes**: Near split dates, strikes with extreme moneyness ratios (K/S > 2.5 or K/S < 0.4) are filtered out. These typically represent unadjusted pre-split strikes.
+
+3. **Records diagnostics**: Split-related fields are added to the `DailyVIXResult`:
+   - `near_split`: Boolean indicating proximity to a split
+   - `days_to_split`: Signed integer (negative = before split, positive = after)
+   - `split_ratio`: The split ratio (e.g., 4.0 for a 4:1 split)
+   - `strikes_filtered_by_split`: Count of strikes filtered due to split proximity
+
+**Why This Matters:**
+
+On a split day, the underlying price is typically adjusted immediately, but the options chain may contain a mix of:
+- New post-split strikes (correct scale)
+- Old pre-split strikes (incorrect scale, appears absurdly OTM)
+
+Without split awareness, these stale strikes can:
+- Corrupt the forward price calculation (put-call parity finds spurious \(K^*\))
+- Dominate the variance integral (the \(1/K^2\) weighting amplifies small strikes)
+- Produce artificial VIX spikes of 200%+ on split days
+
 ## Step 4: Compute Strike Spacing
 
 For each strike `K_i` in the OTM strip, compute the strike spacing `ΔK_i`:
@@ -197,4 +240,15 @@ These QC fields were essential for diagnosing:
 - TSLA spikes driven by tiny strikes with bid=0 / wide asks (parity + \(\frac{1}{K^2}\) dominance)
 - TSLA days with broken strike ladders (e.g., \(K_0\) collapsing far below spot)
 - NVDA split-day scale mismatch (OTM calls priced above spot and implied-forward inconsistencies)
+
+### Split-Related Diagnostics
+
+Additional fields track stock split proximity and filtering:
+
+- `near_split`: Boolean - is this date within 10 days of a known split?
+- `days_to_split`: Signed integer - days relative to split (negative = before)
+- `split_ratio`: The split ratio if near a split (e.g., 4.0 for 4:1)
+- `strikes_filtered_by_split`: Count of strikes removed due to split-related filtering
+
+These fields are populated by loading split metadata from `data/raw/{ticker}_stock_splits.json` files.
 

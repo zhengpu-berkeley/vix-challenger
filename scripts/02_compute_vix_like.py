@@ -105,7 +105,7 @@ def run_pipeline(
         try:
             day_df = load_day_data(data_dir, quote_date)
             
-            result = compute_daily_vix(day_df, quote_date)
+            result = compute_daily_vix(day_df, quote_date, ticker=ticker)
             results.append(result)
             
             qc = compute_day_qc_metrics(day_df, quote_date, vix_result=result)

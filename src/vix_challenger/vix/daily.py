@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 
 from vix_challenger.io.spy_csv import Cols
+from vix_challenger.io.splits import is_near_split, get_split_diagnostics
 from vix_challenger.vix.selection import (
     ExpirySelection,
     SelectionError,
@@ -72,6 +73,12 @@ class DailyVIXResult:
     # Underlying price
     underlying_price: Optional[float] = None
     
+    # Split diagnostics
+    near_split: bool = False
+    days_to_split: Optional[int] = None
+    split_ratio: Optional[float] = None
+    strikes_filtered_by_split: int = 0
+    
     # Status
     success: bool = False
     skip_reason: Optional[str] = None
@@ -86,6 +93,7 @@ def compute_daily_vix(
     min_dte: int = 1,
     apply_cutoff: bool = True,
     min_strikes: int = 5,
+    ticker: Optional[str] = None,
 ) -> DailyVIXResult:
     """Compute VIX-like index for a single trading day.
     
@@ -96,6 +104,7 @@ def compute_daily_vix(
         min_dte: Minimum DTE for expiry selection (default 1)
         apply_cutoff: Whether to apply zero-bid cutoff
         min_strikes: Minimum strikes required per expiry
+        ticker: Ticker symbol (for split-aware filtering)
         
     Returns:
         DailyVIXResult with index value and diagnostics
@@ -127,6 +136,18 @@ def compute_daily_vix(
     underlying_prices = day_df[Cols.UNDERLYING_PRICE].drop_nulls().drop_nans()
     if len(underlying_prices) > 0:
         result.underlying_price = underlying_prices.head(1).item()
+    
+    # Get split diagnostics if ticker is provided
+    if ticker and result.underlying_price:
+        strikes = day_df[Cols.STRIKE].unique().to_list()
+        split_diag = get_split_diagnostics(ticker, quote_date, strikes, result.underlying_price)
+        result.near_split = split_diag["near_split"]
+        result.days_to_split = split_diag["days_to_split"]
+        result.split_ratio = split_diag["split_ratio"]
+        result.strikes_filtered_by_split = split_diag["strikes_filtered"]
+        
+        if result.near_split:
+            result.warning = (result.warning or "") + f" NEAR_SPLIT(days={result.days_to_split})"
     
     # Step 1: Select expirations
     try:
@@ -283,6 +304,10 @@ def result_to_dict(result: DailyVIXResult) -> dict:
         "next_top_contrib_frac": result.next_top_contrib_frac,
         "next_min_strike_contrib_frac": result.next_min_strike_contrib_frac,
         "underlying_price": result.underlying_price,
+        "near_split": result.near_split,
+        "days_to_split": result.days_to_split,
+        "split_ratio": result.split_ratio,
+        "strikes_filtered_by_split": result.strikes_filtered_by_split,
         "success": result.success,
         "skip_reason": result.skip_reason,
         "warning": result.warning,
