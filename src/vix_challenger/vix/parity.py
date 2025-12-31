@@ -166,7 +166,8 @@ def compute_forward_price(
     exp_rT = np.exp(r * T) if T > 0 else 1.0
     forward = k_star + exp_rT * (c_mid_k_star - p_mid_k_star)
     
-    # K0 = max strike where strike <= F (use all strikes, not just the filtered parity set)
+    # K0 = max strike where strike <= F
+    # Use same moneyness filter as for K* selection to avoid split-related artifacts
     strikes = (
         expiry_df[Cols.STRIKE]
         .drop_nulls()
@@ -175,6 +176,13 @@ def compute_forward_price(
         .to_numpy()
     )
     strikes = np.sort(strikes)
+    
+    # Apply moneyness filter to avoid split-unadjusted strikes affecting K0
+    if spot is not None and spot > 0:
+        max_moneyness = 5.0  # Same as in strip.py
+        min_moneyness = 0.20
+        strikes = strikes[(strikes >= spot * min_moneyness) & (strikes <= spot * max_moneyness)]
+    
     strikes_below_f = strikes[strikes <= forward]
     
     if len(strikes_below_f) == 0:

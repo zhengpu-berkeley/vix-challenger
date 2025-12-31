@@ -3,6 +3,7 @@
 - options_loader: Generic options data loading (multi-ticker)
 - spy_csv: Backwards-compatible SPY loader
 - fred: FRED API client
+- splits: Stock split metadata loading
 """
 
 from vix_challenger.io.options_loader import (
@@ -22,6 +23,17 @@ from vix_challenger.io.fred import (
     load_vixcls,
 )
 
+from vix_challenger.io.splits import (
+    SplitEvent,
+    load_splits,
+    get_splits_in_range,
+    get_most_recent_split,
+    is_near_split,
+    get_cumulative_split_factor,
+    should_filter_strike,
+    get_split_diagnostics,
+)
+
 __all__ = [
     # Options loader
     "RawCols",
@@ -36,4 +48,13 @@ __all__ = [
     "download_fred_series",
     "download_vixcls",
     "load_vixcls",
+    # Splits
+    "SplitEvent",
+    "load_splits",
+    "get_splits_in_range",
+    "get_most_recent_split",
+    "is_near_split",
+    "get_cumulative_split_factor",
+    "should_filter_strike",
+    "get_split_diagnostics",
 ]
